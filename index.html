@@ -122,6 +122,30 @@
   .overlay .big{font-size:26px;font-weight:800;}
   .overlay .small{font-size:14px;color:var(--muted);max-width:220px;}
   .paw{font-size:40px;}
+  .speedsel{display:flex;gap:8px;margin:4px 0 2px;flex-wrap:wrap;justify-content:center;}
+  .pill{
+    border:2px solid var(--panel-line);
+    background:rgba(246,230,210,.06);
+    color:var(--muted);
+    border-radius:999px;
+    padding:7px 13px;
+    font-size:13px;
+    font-weight:700;
+    cursor:pointer;
+    transition:all .12s ease;
+  }
+  .pill:hover{border-color:var(--orange);color:var(--cream);}
+  .pill.active{
+    background:linear-gradient(90deg,var(--orange),var(--red));
+    border-color:transparent;
+    color:#2b1c14;
+  }
+  .btn-ghost{
+    background:transparent;
+    border:2px solid var(--panel-line);
+    color:var(--muted);
+  }
+  .btn-ghost:hover{border-color:var(--orange);color:var(--cream);filter:none;}
   @media(max-width:560px){
     .side{width:100%;flex-direction:row;flex-wrap:wrap;}
     .card{flex:1;min-width:150px;}
@@ -139,6 +163,11 @@
           <div class="paw">🐾</div>
           <div class="big" id="ovTitle">냥트리스</div>
           <div class="small" id="ovText">고양이들을 쌓아 줄을 완성하세요!<br>준비되면 시작을 눌러주세요.</div>
+          <div class="speedsel" id="speedSel">
+            <button class="pill" data-speed="chill">느긋냥 🐈</button>
+            <button class="pill active" data-speed="normal">보통냥 😺</button>
+            <button class="pill" data-speed="fast">빠른냥 🙀</button>
+          </div>
           <button class="btn" id="ovBtn" style="width:auto;padding:11px 26px;">시작하기</button>
         </div>
       </div>
@@ -165,6 +194,7 @@
         </div>
       </div>
       <button class="btn" id="pauseBtn">일시정지</button>
+      <button class="btn btn-ghost" id="soundBtn">🔊 효과음 켜짐</button>
     </div>
   </div>
 
@@ -211,7 +241,63 @@
   let running = false, paused = false, gameOver = false, started = false;
   let rafId = null;
 
+  // 속도(난이도) 프리셋: 시작 낙하 간격(ms)과 레벨당 가속량
+  const SPEEDS = {
+    chill:  { start: 1200, step: 70,  min: 220, label:'느긋냥 🐈' },
+    normal: { start: 900,  step: 80,  min: 150, label:'보통냥 😺' },
+    fast:   { start: 600,  step: 90,  min: 90,  label:'빠른냥 🙀' }
+  };
+  let speedMode = 'normal';
+
   const el = id => document.getElementById(id);
+
+  // ── 효과음 (Web Audio, 파일 없이 생성) ──────────────
+  const Sound = (function(){
+    let ac = null, on = true;
+    function ctx(){
+      if(!ac){ try{ ac = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ return null; } }
+      if(ac && ac.state === 'suspended') ac.resume();
+      return ac;
+    }
+    // 삐용~ 하는 톤 하나 재생
+    function tone(freq, dur, type, vol, slideTo){
+      if(!on) return;
+      const a = ctx(); if(!a) return;
+      const t = a.currentTime;
+      const osc = a.createOscillator();
+      const g = a.createGain();
+      osc.type = type || 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      if(slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol||0.15, t + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(g); g.connect(a.destination);
+      osc.start(t); osc.stop(t + dur + 0.02);
+    }
+    function seq(notes){ // [{f,d,type,v,slide,at}]
+      if(!on) return;
+      let acc = 0;
+      notes.forEach(n=>{ setTimeout(()=>tone(n.f, n.d, n.type, n.v, n.slide), acc*1000); acc += n.gap || n.d; });
+    }
+    return {
+      move(){ tone(320, 0.05, 'square', 0.06); },
+      rotate(){ tone(520, 0.07, 'triangle', 0.09); },
+      drop(){ tone(180, 0.09, 'sine', 0.12, 90); },
+      hard(){ tone(140, 0.13, 'sawtooth', 0.14, 60); },
+      land(){ tone(240, 0.06, 'square', 0.07); },
+      clear(n){ // 야옹~ 상승 아르페지오, 여러 줄일수록 화려하게
+        const base = [523,659,784,1047];
+        seq(base.slice(0, Math.min(4, n+1)).map((f,i)=>({f, d:0.11, type:'triangle', v:0.16, gap:0.075})));
+      },
+      levelup(){ seq([{f:660,d:0.1,v:0.15,gap:0.09},{f:880,d:0.1,v:0.15,gap:0.09},{f:1175,d:0.18,v:0.16}]); },
+      over(){ seq([{f:400,d:0.2,type:'triangle',v:0.16,slide:380,gap:0.16},{f:300,d:0.22,type:'triangle',v:0.16,slide:280,gap:0.2},{f:200,d:0.4,type:'triangle',v:0.16,slide:120}]); },
+      start(){ seq([{f:523,d:0.09,v:0.14,gap:0.08},{f:784,d:0.14,v:0.15}]); },
+      toggle(){ on = !on; if(on) tone(660,0.1,'triangle',0.14); return on; },
+      isOn(){ return on; },
+      prime(){ ctx(); }
+    };
+  })();
 
   function newGrid(){
     return Array.from({length:ROWS}, ()=>Array(COLS).fill(0));
@@ -282,8 +368,12 @@
       const pts = [0,100,300,500,800][cleared] * level;
       score += pts;
       lines += cleared;
+      const prevLevel = level;
       level = Math.floor(lines/10) + 1;
-      dropInterval = Math.max(120, 1000 - (level-1)*80);
+      const sp = SPEEDS[speedMode];
+      dropInterval = Math.max(sp.min, sp.start - (level-1)*sp.step);
+      Sound.clear(cleared);
+      if(level > prevLevel) setTimeout(()=>Sound.levelup(), 220);
       updateStats();
     }
   }
@@ -302,6 +392,7 @@
       current.y++;
     } else {
       merge(current);
+      Sound.land();
       clearLines();
       spawn();
     }
@@ -313,6 +404,7 @@
     while(!collides(current,0,1)){ current.y++; dist++; }
     score += dist * 2;
     merge(current);
+    Sound.hard();
     clearLines();
     spawn();
     updateStats();
@@ -320,7 +412,7 @@
   }
 
   function move(dir){
-    if(!collides(current,dir,0)) current.x += dir;
+    if(!collides(current,dir,0)){ current.x += dir; Sound.move(); }
   }
 
   function tryRotate(){
@@ -330,6 +422,7 @@
       if(!collides(current,k,0,rotated)){
         current.m = rotated;
         current.x += k;
+        Sound.rotate();
         return;
       }
     }
@@ -381,34 +474,52 @@
 
     if(ghost){ ctx.restore(); return; }
 
-    // 눈
-    ctx.fillStyle = '#2b1c14';
-    const eyeY = y + s*0.50, eyeR = Math.max(1.4, s*0.075);
-    ctx.beginPath(); ctx.arc(x + s*0.34, eyeY, eyeR, 0, Math.PI*2); ctx.fill();
-    ctx.beginPath(); ctx.arc(x + s*0.66, eyeY, eyeR, 0, Math.PI*2); ctx.fill();
-    // 눈 반짝
-    ctx.fillStyle = 'rgba(246,230,210,.85)';
-    ctx.beginPath(); ctx.arc(x + s*0.36, eyeY - eyeR*0.4, eyeR*0.35, 0, Math.PI*2); ctx.fill();
-    ctx.beginPath(); ctx.arc(x + s*0.68, eyeY - eyeR*0.4, eyeR*0.35, 0, Math.PI*2); ctx.fill();
+    // 발그레한 볼 (분홍빛 살구톤)
+    ctx.fillStyle = 'rgba(255,140,120,.45)';
+    ctx.beginPath(); ctx.ellipse(x + s*0.24, y + s*0.66, s*0.10, s*0.07, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x + s*0.76, y + s*0.66, s*0.10, s*0.07, 0, 0, Math.PI*2); ctx.fill();
 
-    // 코 (작은 삼각)
-    ctx.fillStyle = '#7a2f1a';
+    // 큰 눈 (또렷하고 동그랗게)
+    ctx.fillStyle = '#2b1c14';
+    const eyeY = y + s*0.52, eyeR = Math.max(2.2, s*0.13);
+    ctx.beginPath(); ctx.arc(x + s*0.33, eyeY, eyeR, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + s*0.67, eyeY, eyeR, 0, Math.PI*2); ctx.fill();
+    // 큰 하이라이트 (반짝)
+    ctx.fillStyle = 'rgba(246,230,210,.95)';
+    ctx.beginPath(); ctx.arc(x + s*0.36, eyeY - eyeR*0.35, eyeR*0.45, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + s*0.70, eyeY - eyeR*0.35, eyeR*0.45, 0, Math.PI*2); ctx.fill();
+    // 작은 보조 반짝
+    ctx.fillStyle = 'rgba(246,230,210,.7)';
+    ctx.beginPath(); ctx.arc(x + s*0.30, eyeY + eyeR*0.35, eyeR*0.22, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + s*0.64, eyeY + eyeR*0.35, eyeR*0.22, 0, Math.PI*2); ctx.fill();
+
+    // 코 (작은 하트빛 삼각)
+    ctx.fillStyle = '#e5867a';
     ctx.beginPath();
-    ctx.moveTo(x + s*0.50, y + s*0.62);
-    ctx.lineTo(x + s*0.44, y + s*0.57);
-    ctx.lineTo(x + s*0.56, y + s*0.57);
+    ctx.moveTo(x + s*0.50, y + s*0.70);
+    ctx.lineTo(x + s*0.45, y + s*0.65);
+    ctx.lineTo(x + s*0.55, y + s*0.65);
     ctx.closePath();
     ctx.fill();
 
-    // 수염
-    ctx.strokeStyle = 'rgba(43,28,20,.55)';
-    ctx.lineWidth = Math.max(0.8, s*0.018);
-    const wy = y + s*0.62;
+    // 방긋 입 (ω 모양 미소)
+    ctx.strokeStyle = 'rgba(43,28,20,.7)';
+    ctx.lineWidth = Math.max(1, s*0.03);
+    ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(x + s*0.40, wy);      ctx.lineTo(x + s*0.14, wy - s*0.04);
-    ctx.moveTo(x + s*0.40, wy+s*0.04); ctx.lineTo(x + s*0.15, wy + s*0.06);
-    ctx.moveTo(x + s*0.60, wy);      ctx.lineTo(x + s*0.86, wy - s*0.04);
-    ctx.moveTo(x + s*0.60, wy+s*0.04); ctx.lineTo(x + s*0.85, wy + s*0.06);
+    ctx.arc(x + s*0.435, y + s*0.74, s*0.07, 0.15*Math.PI, 0.85*Math.PI);
+    ctx.arc(x + s*0.565, y + s*0.74, s*0.07, 0.15*Math.PI, 0.85*Math.PI);
+    ctx.stroke();
+
+    // 수염
+    ctx.strokeStyle = 'rgba(43,28,20,.4)';
+    ctx.lineWidth = Math.max(0.8, s*0.016);
+    const wy = y + s*0.70;
+    ctx.beginPath();
+    ctx.moveTo(x + s*0.20, wy);       ctx.lineTo(x + s*0.02, wy - s*0.05);
+    ctx.moveTo(x + s*0.20, wy+s*0.05); ctx.lineTo(x + s*0.03, wy + s*0.07);
+    ctx.moveTo(x + s*0.80, wy);       ctx.lineTo(x + s*0.98, wy - s*0.05);
+    ctx.moveTo(x + s*0.80, wy+s*0.05); ctx.lineTo(x + s*0.97, wy + s*0.07);
     ctx.stroke();
 
     ctx.restore();
@@ -489,14 +600,16 @@
   }
 
   function startGame(){
+    Sound.prime();
     grid = newGrid();
     score = 0; lines = 0; level = 1;
-    dropInterval = 1000; dropCounter = 0; lastTime = performance.now();
+    dropInterval = SPEEDS[speedMode].start; dropCounter = 0; lastTime = performance.now();
     gameOver = false; paused = false; running = true; started = true;
     bag = []; nextPiece = null;
     spawn();
     updateStats();
     hideOverlay();
+    Sound.start();
     el('pauseBtn').textContent = '일시정지';
     if(rafId) cancelAnimationFrame(rafId);
     loop();
@@ -505,6 +618,7 @@
   function endGame(){
     gameOver = true; running = false;
     render();
+    Sound.over();
     showOverlay('게임 오버 🙀', `점수 <b style="color:#f2913d">${score}</b> · ${lines}줄 완성!<br>다시 도전할까요?`, '다시 시작');
   }
 
@@ -547,6 +661,21 @@
     else togglePause();
   });
   el('pauseBtn').addEventListener('click', togglePause);
+
+  // 속도(난이도) 선택
+  el('speedSel').addEventListener('click', e=>{
+    const b = e.target.closest('.pill');
+    if(!b) return;
+    speedMode = b.dataset.speed;
+    document.querySelectorAll('#speedSel .pill').forEach(p=>p.classList.toggle('active', p===b));
+    Sound.prime(); Sound.move();
+  });
+
+  // 효과음 토글
+  el('soundBtn').addEventListener('click', ()=>{
+    const on = Sound.toggle();
+    el('soundBtn').textContent = on ? '🔊 효과음 켜짐' : '🔇 효과음 꺼짐';
+  });
 
   // 첫 화면
   grid = newGrid();
