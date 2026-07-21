@@ -202,13 +202,31 @@
 (function(){
   "use strict";
 
-  const COLS = 10, ROWS = 20, CELL = 32;
+  const COLS = 10, ROWS = 20;
+  let CELL = 32;                         // 뷰포트에 맞춰 동적으로 계산
   const board = document.getElementById('board');
   const bctx = board.getContext('2d');
-  board.width = COLS * CELL;
-  board.height = ROWS * CELL;
-  board.style.setProperty('--cell', CELL + 'px');
-  document.querySelector('.stage').style.setProperty('--cell', CELL + 'px');
+  const stage = document.querySelector('.stage');
+
+  // 한 화면에 꼭 맞도록 셀 크기 계산 (세로 높이 우선)
+  function computeCell(){
+    const vh = window.innerHeight, vw = window.innerWidth;
+    const wide = vw >= 640;             // 사이드 패널이 옆에 붙는 넓은 화면 여부
+    const reserveH = wide ? 150 : 210;  // 제목/여백(+좁으면 사이드가 아래로)
+    const availW = wide ? (vw - 250) : (vw - 34);   // 넓으면 사이드 패널 폭 확보
+    const byH = (vh - reserveH) / ROWS;
+    const byW = availW / COLS;
+    return Math.max(13, Math.min(34, Math.floor(Math.min(byH, byW))));
+  }
+
+  function applySize(){
+    CELL = computeCell();
+    board.width = COLS * CELL;
+    board.height = ROWS * CELL;
+    board.style.setProperty('--cell', CELL + 'px');
+    stage.style.setProperty('--cell', CELL + 'px');
+    if(typeof render === 'function') render();
+  }
 
   const nextCanvas = document.getElementById('next');
   const nctx = nextCanvas.getContext('2d');
@@ -251,7 +269,7 @@
 
   const el = id => document.getElementById(id);
 
-  // ── 효과음 (Web Audio, 파일 없이 생성) ──────────────
+  // ── 효과음: 고양이 야옹 소리 (Web Audio 합성, 파일 없음) ──
   const Sound = (function(){
     let ac = null, on = true;
     function ctx(){
@@ -259,41 +277,58 @@
       if(ac && ac.state === 'suspended') ac.resume();
       return ac;
     }
-    // 삐용~ 하는 톤 하나 재생
-    function tone(freq, dur, type, vol, slideTo){
+    // 야옹 한 번: 피치가 올랐다 내려가고(모음 스윕), 밴드패스로 "냐옹" 음색.
+    // f0 시작음, peak 정점, end 끝음, dur 길이(s), vol 음량
+    function meow(o){
       if(!on) return;
       const a = ctx(); if(!a) return;
-      const t = a.currentTime;
-      const osc = a.createOscillator();
+      const t = (o.at ? a.currentTime + o.at : a.currentTime);
+      const dur = o.dur, vol = o.vol;
+      // 성대: 톱니 + 살짝 디튠된 사각으로 두툼하게
+      const osc = a.createOscillator();  osc.type = 'sawtooth';
+      const osc2 = a.createOscillator(); osc2.type = 'square'; osc2.detune.value = -8;
+      [osc,osc2].forEach(os=>{
+        os.frequency.setValueAtTime(o.f0, t);
+        os.frequency.linearRampToValueAtTime(o.peak, t + dur*0.28);   // 냐~ (상승)
+        os.frequency.linearRampToValueAtTime(o.end,  t + dur);        // ~옹 (하강)
+      });
+      // 비브라토(살아있는 울음)
+      const lfo = a.createOscillator(); lfo.type='sine'; lfo.frequency.value = 22;
+      const lfoG = a.createGain(); lfoG.gain.value = Math.min(18, o.f0*0.04);
+      lfo.connect(lfoG); lfoG.connect(osc.frequency); lfoG.connect(osc2.frequency);
+      // 입 모양(포먼트): 밴드패스가 살짝 열렸다 닫힘 → "먀-아-오"
+      const bp = a.createBiquadFilter(); bp.type='bandpass'; bp.Q.value = 4.5;
+      bp.frequency.setValueAtTime(700, t);
+      bp.frequency.linearRampToValueAtTime(1300, t + dur*0.3);
+      bp.frequency.linearRampToValueAtTime(650, t + dur);
       const g = a.createGain();
-      osc.type = type || 'sine';
-      osc.frequency.setValueAtTime(freq, t);
-      if(slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
       g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(vol||0.15, t + 0.012);
+      g.gain.exponentialRampToValueAtTime(vol, t + 0.03);
+      g.gain.setValueAtTime(vol, t + dur*0.55);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-      osc.connect(g); g.connect(a.destination);
-      osc.start(t); osc.stop(t + dur + 0.02);
-    }
-    function seq(notes){ // [{f,d,type,v,slide,at}]
-      if(!on) return;
-      let acc = 0;
-      notes.forEach(n=>{ setTimeout(()=>tone(n.f, n.d, n.type, n.v, n.slide), acc*1000); acc += n.gap || n.d; });
+      osc.connect(bp); osc2.connect(bp); bp.connect(g); g.connect(a.destination);
+      osc.start(t); osc2.start(t); lfo.start(t);
+      osc.stop(t + dur + 0.05); osc2.stop(t + dur + 0.05); lfo.stop(t + dur + 0.05);
     }
     return {
-      move(){ tone(320, 0.05, 'square', 0.06); },
-      rotate(){ tone(520, 0.07, 'triangle', 0.09); },
-      drop(){ tone(180, 0.09, 'sine', 0.12, 90); },
-      hard(){ tone(140, 0.13, 'sawtooth', 0.14, 60); },
-      land(){ tone(240, 0.06, 'square', 0.07); },
-      clear(n){ // 야옹~ 상승 아르페지오, 여러 줄일수록 화려하게
-        const base = [523,659,784,1047];
-        seq(base.slice(0, Math.min(4, n+1)).map((f,i)=>({f, d:0.11, type:'triangle', v:0.16, gap:0.075})));
+      move(){   meow({f0:620, peak:700, end:640, dur:0.05, vol:0.05}); },   // 짧은 "냡"
+      rotate(){ meow({f0:560, peak:920, end:680, dur:0.13, vol:0.11}); },   // "먀옹"
+      drop(){   meow({f0:430, peak:520, end:390, dur:0.10, vol:0.10}); },
+      hard(){   meow({f0:300, peak:470, end:210, dur:0.20, vol:0.17}); },   // 낮은 "먀아옹"
+      land(){   meow({f0:470, peak:560, end:440, dur:0.09, vol:0.09}); },
+      clear(n){ // 줄 완성: 여러 마리가 신나게 야옹야옹 (줄 많을수록 더 높이)
+        const pitch = [520, 620, 740, 880];
+        for(let i=0;i<=Math.min(3,n);i++){
+          meow({f0:pitch[i], peak:pitch[i]*1.5, end:pitch[i]*1.1, dur:0.22, vol:0.16, at:i*0.14});
+        }
       },
-      levelup(){ seq([{f:660,d:0.1,v:0.15,gap:0.09},{f:880,d:0.1,v:0.15,gap:0.09},{f:1175,d:0.18,v:0.16}]); },
-      over(){ seq([{f:400,d:0.2,type:'triangle',v:0.16,slide:380,gap:0.16},{f:300,d:0.22,type:'triangle',v:0.16,slide:280,gap:0.2},{f:200,d:0.4,type:'triangle',v:0.16,slide:120}]); },
-      start(){ seq([{f:523,d:0.09,v:0.14,gap:0.08},{f:784,d:0.14,v:0.15}]); },
-      toggle(){ on = !on; if(on) tone(660,0.1,'triangle',0.14); return on; },
+      levelup(){ // 신난 이중 야옹
+        meow({f0:640, peak:1000, end:760, dur:0.2, vol:0.16, at:0});
+        meow({f0:820, peak:1250, end:900, dur:0.26, vol:0.17, at:0.16});
+      },
+      over(){ meow({f0:640, peak:700, end:170, dur:0.75, vol:0.2}); },      // 슬픈 "먀아아옹~"
+      start(){ meow({f0:520, peak:880, end:560, dur:0.3, vol:0.16}); },     // 반가운 야옹
+      toggle(){ on = !on; if(on) meow({f0:560, peak:900, end:640, dur:0.16, vol:0.14}); return on; },
       isOn(){ return on; },
       prime(){ ctx(); }
     };
@@ -677,9 +712,16 @@
     el('soundBtn').textContent = on ? '🔊 효과음 켜짐' : '🔇 효과음 꺼짐';
   });
 
+  // 화면 크기 변화 대응
+  let resizeTO = null;
+  window.addEventListener('resize', ()=>{
+    clearTimeout(resizeTO);
+    resizeTO = setTimeout(applySize, 120);
+  });
+
   // 첫 화면
   grid = newGrid();
-  render();
+  applySize();   // CELL 계산 + 첫 렌더
 })();
 </script>
 </body>
